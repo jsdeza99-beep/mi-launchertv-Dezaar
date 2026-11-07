@@ -54,12 +54,12 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -93,7 +93,10 @@ data class Config(
     val userName: String,
     val wallpaper: String,
     val topButtons: List<TopButton>,
-    val rows: List<AppRow>
+    val rows: List<AppRow>,
+    val wallMode: Int = 0,
+    val wallZoom: Int = 100,
+    val wallDim: Int = 40
 )
 
 object ConfigStore {
@@ -117,7 +120,8 @@ object ConfigStore {
                 val r = rw.getJSONArray(i)
                 AppRow((0 until r.length()).map { k -> r.getString(k) })
             }
-            Config(o.optString("name", ""), o.optString("wall", ""), top, rows.ifEmpty { listOf(AppRow(emptyList())) })
+            Config(o.optString("name", ""), o.optString("wall", ""), top, rows.ifEmpty { listOf(AppRow(emptyList())) },
+                o.optInt("wm", 0), o.optInt("wz", 100), o.optInt("wd", 40))
         } catch (e: Exception) {
             null
         }
@@ -127,6 +131,9 @@ object ConfigStore {
         val o = JSONObject()
         o.put("name", c.userName)
         o.put("wall", c.wallpaper)
+        o.put("wm", c.wallMode)
+        o.put("wz", c.wallZoom)
+        o.put("wd", c.wallDim)
         val tb = JSONArray()
         c.topButtons.forEach { tb.put(JSONObject().put("l", it.label).put("a", it.action)) }
         o.put("top", tb)
@@ -278,7 +285,7 @@ object Wallpapers {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(f.path, bounds)
             var s = 1
-            while (bounds.outWidth / (s * 2) >= 1920) s *= 2
+            while (bounds.outWidth / (s * 2) >= 3840) s *= 2
             val opts = BitmapFactory.Options().apply { inSampleSize = s }
             BitmapFactory.decodeFile(f.path, opts)?.asImageBitmap()
         } catch (e: Exception) {
@@ -307,6 +314,7 @@ sealed class Screen {
     data class AddApp(val r: Int) : Screen()
     object Customize : Screen()
     object Wallpapers : Screen()
+    object WallSettings : Screen()
     object DeleteRow : Screen()
     object TopButtons : Screen()
     object AddTopApp : Screen()
@@ -383,12 +391,27 @@ fun LauncherApp(tick: Int) {
                 .background(Brush.verticalGradient(listOf(Color(0xFF0E1420), Color(0xFF1B2838))))
         ) {
             wall?.let {
-                Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                Image(
+                    it,
+                    null,
+                    Modifier
+                        .fillMaxSize()
+                        .scale(config.wallZoom / 100f),
+                    contentScale = if (config.wallMode == 1) ContentScale.Fit else ContentScale.Crop,
+                    filterQuality = FilterQuality.High
+                )
             }
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(Brush.verticalGradient(listOf(Color(0x22000000), Color(0xAA000000))))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Black.copy(alpha = config.wallDim / 100f * 0.5f),
+                                Color.Black.copy(alpha = (config.wallDim / 100f * 1.4f).coerceAtMost(0.95f))
+                            )
+                        )
+                    )
             )
 
             Column(Modifier.fillMaxSize()) {
@@ -499,6 +522,7 @@ fun LauncherApp(tick: Int) {
             Screen.Customize -> {
                 val items = buildList {
                     add(MI("Cambiar fondo de pantalla") { screen = Screen.Wallpapers })
+                    add(MI("Ajustes del fondo (zoom y brillo)") { screen = Screen.WallSettings })
                     add(MI("Agregar una fila nueva") {
                         update(config.copy(rows = config.rows + AppRow(emptyList()))); close()
                     })
@@ -529,6 +553,26 @@ fun LauncherApp(tick: Int) {
                     close,
                     message = "Copia im\u00e1genes JPG/PNG desde tu PC con ADB a:\n" +
                         (Wallpapers.dir(ctx)?.path ?: "(carpeta no disponible)")
+                )
+            }
+
+            Screen.WallSettings -> {
+                val items = buildList {
+                    add(MI("Modo: " + (if (config.wallMode == 0) "Rellenar pantalla" else "Mostrar completa") + "  (cambiar)") {
+                        update(config.copy(wallMode = 1 - config.wallMode))
+                    })
+                    add(MI("Alejar fondo  (-5%)") { update(config.copy(wallZoom = (config.wallZoom - 5).coerceIn(60, 130))) })
+                    add(MI("Acercar fondo  (+5%)") { update(config.copy(wallZoom = (config.wallZoom + 5).coerceIn(60, 130))) })
+                    add(MI("Oscurecer m\u00e1s  (+10%)") { update(config.copy(wallDim = (config.wallDim + 10).coerceIn(0, 90))) })
+                    add(MI("Oscurecer menos  (-10%)") { update(config.copy(wallDim = (config.wallDim - 10).coerceIn(0, 90))) })
+                    add(MI("Restablecer fondo") { update(config.copy(wallMode = 0, wallZoom = 100, wallDim = 40)) })
+                    add(MI("Listo") { close() })
+                }
+                MenuDialog(
+                    "Ajustes del fondo",
+                    items,
+                    close,
+                    message = "Zoom: ${config.wallZoom}%    Oscuridad: ${config.wallDim}%"
                 )
             }
 
