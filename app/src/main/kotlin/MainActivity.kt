@@ -2,6 +2,9 @@ package com.tono.launcher
 
 import android.content.Context
 import android.content.Intent
+import android.media.tv.TvContract
+import android.media.tv.TvInputInfo
+import android.media.tv.TvInputManager
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.os.Bundle
@@ -11,12 +14,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -55,6 +60,8 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.Key
@@ -116,6 +123,9 @@ object ConfigStore {
             if (top.none { it.action == "customize" }) {
                 top = listOf(TopButton("Personalizar", "customize")) + top
             }
+            if (o.optInt("v", 1) < 2 && top.none { it.action == "hdmi" }) {
+                top = top + TopButton("HDMI", "hdmi")
+            }
             val rows = (0 until rw.length()).map { i ->
                 val r = rw.getJSONArray(i)
                 AppRow((0 until r.length()).map { k -> r.getString(k) })
@@ -134,6 +144,7 @@ object ConfigStore {
         o.put("wm", c.wallMode)
         o.put("wz", c.wallZoom)
         o.put("wd", c.wallDim)
+        o.put("v", 2)
         val tb = JSONArray()
         c.topButtons.forEach { tb.put(JSONObject().put("l", it.label).put("a", it.action)) }
         o.put("top", tb)
@@ -162,7 +173,7 @@ object ConfigStore {
         return Config(
             userName = "Sebas",
             wallpaper = "",
-            topButtons = listOf(TopButton("Personalizar", "customize"), TopButton("Ajustes", "settings")),
+            topButtons = listOf(TopButton("Personalizar", "customize"), TopButton("Ajustes", "settings"), TopButton("HDMI", "hdmi")),
             rows = listOf(AppRow(favorites), AppRow(rest))
         )
     }
@@ -315,6 +326,7 @@ sealed class Screen {
     object Customize : Screen()
     object Wallpapers : Screen()
     object WallSettings : Screen()
+    object Hdmi : Screen()
     object DeleteRow : Screen()
     object TopButtons : Screen()
     object AddTopApp : Screen()
@@ -351,6 +363,14 @@ fun LauncherApp(tick: Int) {
                 toast("No se pudo abrir Ajustes")
             }
             b.action == "customize" -> screen = Screen.Customize
+            b.action == "hdmi" -> {
+                val inputs = HdmiInputs.list(ctx)
+                when {
+                    inputs.isEmpty() -> toast("No se encontraron entradas HDMI")
+                    inputs.size == 1 -> if (!HdmiInputs.open(ctx, inputs[0])) toast("No se pudo abrir la entrada HDMI")
+                    else -> screen = Screen.Hdmi
+                }
+            }
             b.action.startsWith("app:") ->
                 if (!Apps.launch(ctx, b.action.removePrefix("app:"))) toast("No se pudo abrir ${b.label}")
         }
@@ -419,68 +439,66 @@ fun LauncherApp(tick: Int) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 48.dp, vertical = 28.dp),
+                        .padding(horizontal = 45.dp, vertical = 24.dp),
                     verticalAlignment = Alignment.Top
                 ) {
                     Column {
                         Text(greeting, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(timeText, color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Light)
-                            Spacer(Modifier.width(24.dp))
-                            Text(dateText, color = Color.White, fontSize = 16.sp)
-                        }
+                        Text(timeText, color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Light)
+                        Text(dateText, color = Color.White, fontSize = 15.sp)
                     }
                     Spacer(Modifier.weight(1f))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        config.topButtons.forEach { b -> Pill(b.label) { runTop(b) } }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        config.topButtons.forEach { b -> Pill(b.label, b.action == "hdmi") { runTop(b) } }
                     }
                 }
 
                 Spacer(Modifier.weight(1f))
 
                 // Filas de apps
-                LazyColumn(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 380.dp)
-                        .padding(bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(horizontal = 32.dp)
-                ) {
-                    itemsIndexed(config.rows) { r, row ->
-                        val big = r == 0
-                        val w = if (big) 190.dp else 160.dp
-                        val h = if (big) 107.dp else 90.dp
-                        val vis = row.packages.withIndex().filter { it.value in installedSet }
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(24.dp))
-                                .background(if (big) Color(0x99252D3F) else Color.Transparent)
-                        ) {
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val tileW = (maxWidth - 90.dp - 40.dp - 98.dp) / 8
+                    val tileH = tileW * 9f / 16f
+                    LazyColumn(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp)
+                            .padding(bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(horizontal = 45.dp)
+                    ) {
+                        itemsIndexed(config.rows) { r, row ->
+                            val vis = row.packages.withIndex().filter { it.value in installedSet }
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(if (r == 0) Color(0x99252D3F) else Color.Transparent)
                             ) {
-                                items(vis, key = { it.value }) { iv ->
-                                    AppTile(
-                                        pkg = iv.value,
-                                        w = w,
-                                        h = h,
-                                        focusRequester = if (r == 0 && iv.index == vis.first().index) firstFocus else null,
-                                        onOpen = {
-                                            if (!Apps.launch(ctx, iv.value)) toast("No se pudo abrir la app")
-                                        },
-                                        onMenu = { screen = Screen.TileMenu(r, iv.index) }
-                                    )
-                                }
-                                item {
-                                    AddTile(
-                                        w = if (big) 80.dp else 70.dp,
-                                        h = h,
-                                        focusRequester = if (r == 0 && vis.isEmpty()) firstFocus else null,
-                                        onClick = { screen = Screen.AddApp(r) }
-                                    )
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                ) {
+                                    items(vis, key = { it.value }) { iv ->
+                                        AppTile(
+                                            pkg = iv.value,
+                                            w = tileW,
+                                            h = tileH,
+                                            focusRequester = if (r == 0 && iv.index == vis.first().index) firstFocus else null,
+                                            onOpen = {
+                                                if (!Apps.launch(ctx, iv.value)) toast("No se pudo abrir la app")
+                                            },
+                                            onMenu = { screen = Screen.TileMenu(r, iv.index) }
+                                        )
+                                    }
+                                    item {
+                                        AddTile(
+                                            w = tileW,
+                                            h = tileH,
+                                            focusRequester = if (r == 0 && vis.isEmpty()) firstFocus else null,
+                                            onClick = { screen = Screen.AddApp(r) }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -576,6 +594,17 @@ fun LauncherApp(tick: Int) {
                 )
             }
 
+            Screen.Hdmi -> {
+                val inputs = HdmiInputs.list(ctx)
+                val items = inputs.map { info ->
+                    MI(HdmiInputs.label(ctx, info)) {
+                        if (!HdmiInputs.open(ctx, info)) toast("No se pudo abrir la entrada HDMI")
+                        close()
+                    }
+                } + MI("Cancelar") { close() }
+                MenuDialog("Entradas HDMI", items, close)
+            }
+
             Screen.DeleteRow -> {
                 val items = config.rows.mapIndexed { i, row ->
                     MI("Fila ${i + 1}  (${row.packages.size} apps)") {
@@ -595,6 +624,11 @@ fun LauncherApp(tick: Int) {
                     if (config.topButtons.none { it.action == "settings" }) {
                         add(MI("Agregar: Ajustes del sistema") {
                             update(config.copy(topButtons = config.topButtons + TopButton("Ajustes", "settings"))); close()
+                        })
+                    }
+                    if (config.topButtons.none { it.action == "hdmi" }) {
+                        add(MI("Agregar: HDMI") {
+                            update(config.copy(topButtons = config.topButtons + TopButton("HDMI", "hdmi"))); close()
                         })
                     }
                     add(MI("Agregar: abrir una app\u2026") { screen = Screen.AddTopApp })
@@ -697,12 +731,12 @@ fun AppTile(
         Text(
             label,
             color = Color.White,
-            fontSize = 14.sp,
+            fontSize = 12.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
-                .padding(top = 6.dp)
-                .height(22.dp)
+                .padding(top = 4.dp)
+                .height(18.dp)
                 .alpha(if (focused) 1f else 0f)
         )
     }
@@ -725,27 +759,49 @@ fun AddTile(w: Dp, h: Dp, focusRequester: FocusRequester?, onClick: () -> Unit) 
         ) {
             Text("+", color = Color.White, fontSize = 36.sp, fontWeight = FontWeight.Light)
         }
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(22.dp))
     }
 }
 
 @Composable
-fun Pill(text: String, onClick: () -> Unit) {
+fun Pill(text: String, hdmi: Boolean = false, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
+    val fg = if (focused) Color.Black else Color.White
     Box(
         Modifier
+            .width(104.dp)
+            .height(32.dp)
             .clip(RoundedCornerShape(50))
-            .background(if (focused) Color.White else Color(0x55FFFFFF))
+            .background(if (focused) Color.White else Color(0x38FFFFFF))
             .onFocusChanged { focused = it.isFocused }
-            .tvClickable(onClick)
-            .padding(horizontal = 26.dp, vertical = 12.dp)
+            .tvClickable(onClick),
+        contentAlignment = Alignment.Center
     ) {
-        Text(
-            text,
-            color = if (focused) Color.Black else Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Medium
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (hdmi) {
+                Canvas(Modifier.size(14.dp, 11.dp)) {
+                    val path = Path().apply {
+                        moveTo(0f, 0f)
+                        lineTo(size.width, 0f)
+                        lineTo(size.width, size.height * 0.55f)
+                        lineTo(size.width * 0.8f, size.height)
+                        lineTo(size.width * 0.2f, size.height)
+                        lineTo(0f, size.height * 0.55f)
+                        close()
+                    }
+                    drawPath(path, fg, style = Stroke(width = 2f))
+                }
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(
+                text,
+                color = fg,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
@@ -832,5 +888,26 @@ fun TextDialog(title: String, initial: String, onDismiss: () -> Unit, onSave: (S
             MenuButton("Guardar") { onSave(text.trim()) }
             MenuButton("Cancelar", null, onDismiss)
         }
+    }
+}
+
+
+object HdmiInputs {
+    fun list(ctx: Context): List<TvInputInfo> = try {
+        val tm = ctx.getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
+        tm.tvInputList.filter { it.type == TvInputInfo.TYPE_HDMI }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    fun label(ctx: Context, info: TvInputInfo): String =
+        (info.loadCustomLabel(ctx) ?: info.loadLabel(ctx) ?: info.id).toString()
+
+    fun open(ctx: Context, info: TvInputInfo): Boolean = try {
+        val uri = TvContract.buildChannelUriForPassthroughInput(info.id)
+        ctx.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (e: Exception) {
+        false
     }
 }
